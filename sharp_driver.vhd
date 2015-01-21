@@ -1,20 +1,3 @@
-----
-----    This file is part of sharp_driver
-----    Copyright (C) 2011  Julien Thevenon ( julien_thevenon at yahoo.fr )
-----
-----    This program is free software: you can redistribute it and/or modify
-----    it under the terms of the GNU General Public License as published by
-----    the Free Software Foundation, either version 3 of the License, or
-----    (at your option) any later version.
-----
-----    This program is distributed in the hope that it will be useful,
-----    but WITHOUT ANY WARRANTY; without even the implied warranty of
-----    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-----    GNU General Public License for more details.
-----
-----    You should have received a copy of the GNU General Public License
-----    along with this program.  If not, see <http://www.gnu.org/licenses/>
-----
 library IEEE;
 use IEEE.STD_LOGIC_1164.all;
 use IEEE.NUMERIC_STD.ALL;
@@ -44,225 +27,208 @@ architecture behavorial of driver_sharp is
   constant TVs : positive := 34;      -- Vertical start period in clock cycle
 
   -- Constants for internal use
+  -- X axis
   constant x_counter_low : positive :=  1024 - THp ;
-  constant x_counter_low_start : positive := x_counter_low + 1;
-  constant x_counter_high : positive :=  1024 - (TH - THp) + 1;
-  constant y_counter_low : positive :=  1024 - TVp;
-  constant y_counter_high : positive :=  1024 - (TV - TVp) + 1;
-  -- Internal signals 
+  constant x_counter_low_start : positive := x_counter_low+1;
+--  constant x_counter_low_start : positive := x_counter_low;
+  constant x_counter_valid : positive :=  1024 - THd + 1;
+  constant x_counter_fill : positive :=  1024 - (TH - THp - THd) + 1;
+  -- Y axis
+  constant y_counter_low : positive :=  512 - TVp + 1;
+  constant y_counter_low_start : positive :=  y_counter_low;
+  constant y_counter_pre_fill : positive :=  512 - (TVs - TVp) + 1;
+  constant y_counter_valid : positive :=  512 - TVd + 1;
+  constant y_counter_post_fill : positive := 512 - (TV - TVp - TVs - TVd + 1) ;
+
+  -- Internal signals related to X axis
   signal x_counter: std_logic_vector( 10 downto 0) := std_logic_vector(to_unsigned(x_counter_low_start,11));       -- counter for x axis
-  signal x_counter_init: std_logic_vector( 10 downto 0) := std_logic_vector(to_unsigned(x_counter_high,11));       -- counter for x axis
+  signal x_counter_init: std_logic_vector( 10 downto 0) := (others => '0');
   signal hsyncP : std_logic := '0';
-  signal hsyncN : std_logic := '1';
+  signal enableP : std_logic := '0';
+  type x_fsm_state_type is (x_low,x_valid,x_fill);
+  signal x_fsm_stateP : x_fsm_state_type := x_low;
+  signal x_fsm_stateN : x_fsm_state_type := x_valid;
+  signal x : std_logic_vector(9 downto 0) := (others => '0');
   
-  signal y_counterP: std_logic_vector( 10 downto 0) := std_logic_vector(to_unsigned(y_counter_low,11));       -- counter for x axis
-  signal y_counter_init: std_logic_vector( 10 downto 0) := std_logic_vector(to_unsigned(y_counter_high,11));       -- counter for x axis
-
-  -- FSM for vsync
-  type vsync_state_type is (low,after_low,high,ready_to_low,before_low);
-  signal vsyncP : vsync_state_type := low;
-  signal vsyncN : vsync_state_type := low ;
-
-  -- counter to determine if line is active or not
-  constant line_counter_low_start : positive :=  512 - TVs;
-  constant line_counter_low : positive :=  512 - (TV - TVd);
-  constant line_counter_high : positive :=  512 - TVd + 1;
-  signal line_counter : std_logic_vector(9 downto 0) := std_logic_vector(to_unsigned(line_counter_low_start,10));
-  signal line_counter_init : std_logic_vector(9 downto 0) := std_logic_vector(to_unsigned(line_counter_low_start,10));
-  type line_state_type is(virtual,first_real,real,after_real);
-  signal line_stateP : line_state_type := virtual;
-  signal line_stateN : line_state_type := virtual;
+  -- Internal signals related to Y axis
+  signal y_counter: std_logic_vector(9 downto 0) := std_logic_vector(to_unsigned(y_counter_low_start,10));       -- counter for x axis
+  signal y_counter_init: std_logic_vector(9 downto 0) := (others => '0');
+  signal vsyncP : std_logic := '0';
+  type y_fsm_state_type is (y_low,y_pre_fill,y_valid,y_post_fill);
+  signal y_fsm_stateP : y_fsm_state_type;
+  signal y_fsm_stateN : y_fsm_state_type;
+  signal y : std_logic_vector(8 downto 0) := (others => '0');
 begin  -- behavorial
 
   -- Process managing outputs
   output_management : process(clk,rst)
   begin
     if rst = '1' then
---			vsync <= '0';
       hsync <= '0';
+      vsync <= '0';
       enable <= '0';
       x_out <= (others => '0');
       y_out <= (others => '0');
     elsif rising_edge(clk) then
---			vsync <= vsyncP;
+      vsync <= vsyncP;
       hsync <= hsyncP;
---			enable <= enableP;
---			x_out <= x_outP;
---			y_out <= x_outP;
+      enable <= enableP;
+      x_out <= x;
+      y_out <= y;
     end if;
   end process;
 
-  -- process managing xcounter increment
-  xcounter_increment : process(clk,rst)
+  -- process managing x_counter increment
+  x_counter_increment : process(clk,rst)
   begin
     if rst = '1' then
       x_counter <= std_logic_vector(to_unsigned(x_counter_low_start,11));
-      hsyncP <= '0';
     elsif rising_edge(clk) then
       if x_counter(10) = '1' then
         x_counter <= x_counter_init;
-        hsyncP <= hsyncN;
       else
         x_counter <= std_logic_vector(unsigned(x_counter)+1);
       end if;
     end if;
   end process;
 
-  -- process preparing next hsync_value
-  prepare_next_hsync : process(hsyncP)
+  -- process computing x_counter_init
+  prepare_x_counter_init : process (x_fsm_stateP)
   begin
-    case hsyncP is
-      when '0' => hsyncN <= '1';
-      when '1' => hsyncN <= '0';
-      when others => hsyncN <= '0';
-    end case;
-  end process;
-
-  -- process computing next x_counter_init
-  prepare_next_counter_init : process (hsyncP)
-  begin
-    case hsyncP is
-      when '0' => x_counter_init <= std_logic_vector(to_unsigned(x_counter_high,11));
-      when '1' => x_counter_init <= std_logic_vector(to_unsigned(x_counter_low,11));
-      when others => x_counter_init <= std_logic_vector(to_unsigned(x_counter_high,11));
+    case x_fsm_stateP is
+      when x_low => x_counter_init <= std_logic_vector(to_unsigned(x_counter_valid,11));
+      when x_valid => x_counter_init <= std_logic_vector(to_unsigned(x_counter_fill,11));
+      when x_fill => x_counter_init <= std_logic_vector(to_unsigned(x_counter_low,11));
+      when others => x_counter_init <= (others => '0');
     end case;
   end process;	
 
+  -- process computing next x_fsm_state
+  prepare_next_x_fsm_state : process (x_fsm_stateP)
+  begin
+    case x_fsm_stateP is
+      when x_low => x_fsm_stateN <= x_valid;
+      when x_valid => x_fsm_stateN <= x_fill;
+      when x_fill => x_fsm_stateN <= x_low;
+      when others => x_fsm_stateN <= x_low;
+    end case;
+  end process;	
+
+  -- process managing x_fsm_state register
+  x_fsm_state_register : process(clk,rst)
+  begin
+    if rst = '1' then
+      x_fsm_stateP <= x_low;
+    elsif rising_edge(clk) then
+      if x_counter(10) = '1' then
+        x_fsm_stateP <= x_fsm_stateN;
+      else
+        x_fsm_stateP <= x_fsm_stateP;
+      end if;
+    end if;
+  end process;
+
+  apply_hsync : hsyncP <= '0' when x_fsm_stateP = x_low else '1';
+  
   -- process managing ycounter increment
   ycounter_increment : process(clk,rst)
   begin
     if rst = '1' then
-      y_counterP <= std_logic_vector(to_unsigned(y_counter_low,11));
+      y_counter <= std_logic_vector(to_unsigned(y_counter_low_start,10));
     elsif rising_edge(clk) then
-      if x_counter(10) = '1' and hsyncP = '1' then
-        if y_counterP(10) = '1' then 
-          y_counterP <= y_counter_init;
+      if x_counter(10) = '1' and x_fsm_stateP = x_fill then
+        if y_counter(9) = '1' then 
+          y_counter <= y_counter_init;
         else
-          y_counterP <= std_logic_vector(unsigned(y_counterP) + 1);
+          y_counter <= std_logic_vector(unsigned(y_counter) + 1);
         end if;
       else
-        y_counterP <= y_counterP;
+        y_counter <= y_counter;
       end if;
+
     end if;
   end process;
 
   -- prepare the init value for ycounter
-  prepare_ycounter_init : process(vsyncP)
+  prepare_ycounter_init : process(y_fsm_stateP)
   begin
-    case vsyncP is
-      when low => y_counter_init <= std_logic_vector(to_unsigned(y_counter_high,11));
-      when after_low => y_counter_init <= std_logic_vector(to_unsigned(y_counter_high,11));
-      when high => y_counter_init <= std_logic_vector(to_unsigned(y_counter_low,11));
-      when ready_to_low => y_counter_init <= std_logic_vector(to_unsigned(y_counter_low,11));
-      when others => y_counter_init <= std_logic_vector(to_unsigned(y_counter_high,11));
+    case y_fsm_stateP is
+      when y_low => y_counter_init <= std_logic_vector(to_unsigned(y_counter_pre_fill,10));
+      when y_pre_fill => y_counter_init <= std_logic_vector(to_unsigned(y_counter_valid,10));
+      when y_valid => y_counter_init <= std_logic_vector(to_unsigned(y_counter_post_fill,10));
+      when y_post_fill => y_counter_init <= std_logic_vector(to_unsigned(y_counter_low,10));
+      when others => y_counter_init <= std_logic_vector(to_unsigned(y_counter_low,10));
     end case;
   end process;
 
-  --vsync state register
-  vsync_state_register_process : process(clk,rst)
+  -- process computing next y_fsm_state
+  vsync_state_transition_process : process(y_fsm_stateP)
   begin
-    if rst = '1' then
-      vsyncP <= low;
-    elsif rising_edge(clk) then
-      vsyncP <= vsyncN;
-    end if;
-  end process;
-  
-  --vsync state transition
-  vsync_state_transition_process : process(vsyncP,hsyncP,y_counterP,x_counter)
-  begin
-    case vsyncP is
-      when low => if y_counterP(10) = '1' then
-                    vsyncN <= after_low;
-                  else
-                    vsyncN <= low ;
-                  end if;
-      when after_low => if y_counterP(10) = '1' then
-                          vsyncN <= after_low;
-                        else
-                          vsyncN <= high ;
-                        end if;
-      when high => if y_counterP(10) = '1' and vsyncP = high then
-                     vsyncN <= ready_to_low;
-                   else
-                     vsyncN <= high;
-                   end if;
-      when ready_to_low => if x_counter(10) = '1' and hsyncP = '1' then
-                             vsyncN <= before_low;
-                           else
-                             vsyncN <= ready_to_low;
-                           end if;
-      when before_low => vsyncN <= low;
-      when others => vsyncN <= low ;
+    case y_fsm_stateP is
+      when y_low => y_fsm_stateN <= y_pre_fill;
+      when y_pre_fill => y_fsm_stateN <= y_valid;
+      when y_valid => y_fsm_stateN <= y_post_fill;
+      when y_post_fill => y_fsm_stateN <= y_low;
+      when others => y_fsm_stateN <= y_low;
     end case;
   end process;
   
-  --vsync output function
-  apply_vsync : vsync <= '0' when vsyncP = low else '1';
-
-  -- Process managing line state 
-  line_state_register: process(clk,rst)
+  -- process managing y_fsm_state_register
+  y_fsm_state_register : process(clk,rst)
   begin
     if rst = '1' then
-      line_stateP <= virtual;
+      y_fsm_stateP <= y_low;
     elsif rising_edge(clk) then
-      line_stateP <= line_stateN;
-    end if;
-  end process;
-
-  --line_state transition
-  line_state_transition : process(line_stateP,line_counter(9))
-  begin
-    case line_stateP is
-      when virtual => if line_counter(9) = '1' then
-                        line_stateN <= first_real ;
-                      else
-                        line_stateN <= virtual;
-                      end if;
-      when first_real => if line_counter(9) = '0' then
-                           line_stateN <= real;
-                         else
-                           line_stateN <= first_real;
-                         end if;
-      when real => if line_counter(9) = '1' then
-                     line_stateN <= after_real;
-                   else
-                     line_stateN <= real;
-                   end if;
-      when after_real => if line_counter(9) = '0' then
-                           line_stateN <= virtual;
-                         else
-                           line_stateN <= after_real;
-                         end if;
-      when others => line_stateN <= virtual;
-    end case;
-  end process;
-  
-  -- line counter increment
-  line_couter_increment : process(clk,rst)
-  begin
-    if rst = '1' then
-      line_counter <= std_logic_vector(to_unsigned(line_counter_low_start,10));
-    elsif rising_edge(clk) then
-      if x_counter(10) = '1' and hsyncP = '1' then
-        if line_counter(9) = '1' then 
-          line_counter <= line_counter_init;
-        else
-          line_counter <= std_logic_vector(unsigned(line_counter) + 1);
-        end if;
+      if y_counter(9) = '1' and x_counter(10) = '1' and x_fsm_stateP = x_fill then 
+        y_fsm_stateP <= y_fsm_stateN;
+      else
+        y_fsm_stateP <= y_fsm_stateP;
       end if;
     end if;
   end process;
+  
+--vsync output function
+  apply_vsync : vsyncP <= '0' when y_fsm_stateP = y_low else '1';
 
-  prepare_line_counter_init : process(line_stateP)
+-- enable output function
+  apply_enable : enableP <= '1' when y_fsm_stateP = y_valid and x_fsm_stateP = x_valid else '0';
+
+  --process managing x increment
+  x_increment : process(clk,rst)
   begin
-    case line_stateP is
-      when virtual => line_counter_init <= std_logic_vector(to_unsigned(line_counter_high,10));
-      when first_real => line_counter_init <= std_logic_vector(to_unsigned(line_counter_high,10));
-      when real => line_counter_init <= std_logic_vector(to_unsigned(line_counter_low,10));
-      when after_real => line_counter_init <= std_logic_vector(to_unsigned(line_counter_low,10));
-      when others => line_counter_init <= std_logic_vector(to_unsigned(line_counter_high,10));
-    end case;
+    if rst = '1' then
+      x <= (others => '0');
+    elsif rising_edge(clk) then
+      if x_fsm_stateP = x_valid and y_fsm_statep = y_valid then
+        if x_counter(10) = '0' then
+          x <= std_logic_vector(unsigned(x) + 1);
+        else
+          x <= (others => '0');
+        end if;
+      else
+        x <= x;
+      end if;
+    end if;
+  end process;
+  
+  -- process managing y increment
+  y_increment : process(clk,rst)
+  begin
+    if rst = '1' then
+      y <= (others => '0');
+    elsif rising_edge(clk) then
+      if y_fsm_stateP = y_valid  and x_fsm_stateP = x_fill then
+        if x_counter(10) = '1'then
+          if y_counter(9) = '0' then
+            y <= std_logic_vector(unsigned(y) + 1);
+          else
+            y <= (others => '0');
+          end if;
+        end if;
+      else
+        y <= y;
+      end if;
+    end if;
   end process;
 end behavorial;
 
